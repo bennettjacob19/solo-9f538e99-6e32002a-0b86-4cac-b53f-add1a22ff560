@@ -6,7 +6,7 @@
 <title>双副本故障演练控制台</title>
 <style>
   :root { --bg:#0f1420; --panel:#1a2233; --border:#2b3a56; --fg:#e6ebf5; --muted:#8b98b8;
-          --green:#2fbf71; --red:#e5484d; --yellow:#f5a524; --gray:#5b6b8c; }
+          --green:#2fbf71; --red:#e5484d; --yellow:#f5a524; --gray:#5b6b8c; --blue:#2f6fed; }
   * { box-sizing: border-box; }
   body { margin:0; font-family:"PingFang SC","Microsoft YaHei",system-ui,sans-serif;
          background:var(--bg); color:var(--fg); }
@@ -27,7 +27,9 @@
   .dot.unknown { background:var(--gray); }
   .flags { color:var(--yellow); font-size:12px; min-height:16px; margin-top:4px; }
   .url { color:var(--muted); font-size:12px; margin-top:4px; }
-  button { background:#2f6fed; color:#fff; border:none; border-radius:6px; padding:8px 14px;
+  .policy { margin-top:8px; padding-top:8px; border-top:1px dashed var(--border); font-size:13px; }
+  .policy b { color:#7cc7ff; }
+  button { background:var(--blue); color:#fff; border:none; border-radius:6px; padding:8px 14px;
            font-size:13px; cursor:pointer; margin:4px 6px 0 0; }
   button:hover { background:#3d7bff; }
   button:disabled { background:#33405e; cursor:not-allowed; }
@@ -36,10 +38,13 @@
                   border-radius:6px; padding:7px 10px; font-size:13px; margin-right:10px; }
   label { font-size:13px; color:var(--muted); margin-right:14px; }
   .badge { display:inline-block; padding:3px 10px; border-radius:12px; font-size:12px; font-weight:600; }
-  .st-active { background:#123; color:#7cc7ff; border:1px solid #2f6fed; }
+  .st-active { background:#123; color:#7cc7ff; border:1px solid var(--blue); }
   .st-recovering { background:#2a2103; color:var(--yellow); border:1px solid var(--yellow); }
   .st-pending_recovery { background:#2a0d0e; color:var(--red); border:1px solid var(--red); }
   .st-finished { background:#0e2a1a; color:var(--green); border:1px solid var(--green); }
+  .st-committed { background:#0e2a1a; color:var(--green); border:1px solid var(--green); }
+  .st-preparing, .st-committing { background:#123; color:#7cc7ff; border:1px solid var(--blue); }
+  .st-aborted, .st-failed, .st-interrupted { background:#2a0d0e; color:var(--red); border:1px solid var(--red); }
   .conclusion { margin-top:10px; padding:10px 14px; border-radius:8px; font-weight:600; font-size:14px; }
   .conclusion.available { background:#0e2a1a; color:var(--green); }
   .conclusion.unavailable { background:#2a0d0e; color:var(--red); }
@@ -56,6 +61,7 @@
   .ok-msg { color:var(--green); } .err-msg { color:var(--red); }
   .msg { font-size:13px; margin-top:8px; min-height:18px; }
   #cd { font-size:22px; font-weight:700; color:#7cc7ff; }
+  .muted-small { color:var(--muted); font-size:12px; margin-top:6px; }
 </style>
 </head>
 <body>
@@ -67,6 +73,27 @@
   <section>
     <h2>副本实时状态</h2>
     <div class="cards" id="replicas"></div>
+  </section>
+
+  <section>
+    <h2>接单耗时策略发布(两副本两阶段提交, 50~500 毫秒)</h2>
+    <div class="kv" id="policyOverview">加载中…</div>
+    <div style="margin-top:10px">
+      <label>新上限(毫秒, 50~500)
+        <input id="maxMs" type="number" min="50" max="500" step="10" value="120" style="width:110px">
+      </label>
+      <label>所见策略版
+        <input id="expectedVersion" type="number" min="1" value="1" style="width:100px">
+      </label>
+      <button id="publishBtn">发布到两副本</button>
+    </div>
+    <div class="muted-small">
+      流程: 控制台先向两副本下发 prepare 预案, 两端都确认后才逐台 commit;
+      任一端不可达、写入失败或并发版冲突都会中止发布并回滚预案, 旧规则继续服务。
+      发布期间已受理的请求按入站时的规则完成。
+    </div>
+    <div class="msg" id="publishMsg"></div>
+    <table id="publishes"></table>
   </section>
 
   <section>
@@ -87,7 +114,10 @@
   <section id="drill-panel"><h2>本轮演练</h2><div id="drillBody">加载中…</div></section>
 
   <section>
-    <h2>真实 /work 请求(向任一副本发起真实接单调用)</h2>
+    <h2>真实 /work 试单(可指定模拟耗时; 不填则按 50ms 默认处理, 超上限返回 429)</h2>
+    <label>试单耗时(毫秒, 可选)
+      <input id="workDuration" type="number" min="1" max="5000" placeholder="默认 50" style="width:120px">
+    </label>
     <button onclick="sendWork('replica1')">向 replica1 发送 /work</button>
     <button onclick="sendWork('replica2')">向 replica2 发送 /work</button>
     <div class="msg" id="workMsg"></div>
@@ -110,6 +140,10 @@ const CONCLUSION_TEXT = {
   interrupted:'⚠️ 中断:演练被服务重启打断,无有效结论'
 };
 const CONCLUSION_SHORT = {available:'可用', unavailable:'不可用', interrupted:'中断'};
+const PUBLISH_TEXT = {
+  preparing:'预案下发中', committing:'提交中', committed:'✅ 已两端生效',
+  aborted:'已中止(旧规则继续)', failed:'❌ 发布失败', interrupted:'⚠️ 重启中断(未生效)'
+};
 
 let lastState = null;
 let serverOffset = 0;
@@ -132,6 +166,7 @@ function render(s){
   document.getElementById('clock').textContent = '服务器时间 ' + fmt(s.now);
   renderReplicas(s);
   document.getElementById('startBtn').disabled = !!s.drill;
+  renderPolicy(s);
   renderDrill(s);
   renderWorks(s);
   renderHistory(s);
@@ -144,16 +179,46 @@ function renderReplicas(s){
     if(r.fault_injected) flags.push('故障注入中');
     if(r.manual_down) flags.push('手动宕机');
     const canToggle = !s.drill;
+    const pv = r.policy_version!=null ? `v${r.policy_version}` : '未知';
+    const pm = r.policy_max_ms!=null ? `${r.policy_max_ms}ms` : '-';
     return `<div class="card">
       <h3>${name}</h3>
       <div><span class="dot ${cls}"></span>${r.ok===true?'健康':r.ok===false?'不可用':'未知'}
         ${r.status_code?('HTTP '+r.status_code):''} ${r.latency_ms!=null?(r.latency_ms+'ms'):''}
         ${r.detail?esc(r.detail):''}</div>
       <div class="flags">${flags.join(' · ')||'&nbsp;'}</div>
+      <div class="policy">生效策略版 <b>${pv}</b> ｜ 接单耗时上限 <b>${pm}</b></div>
       <div class="url">${esc(r.url||'')}</div>
       ${canToggle?`<button class="warn-btn" onclick="overrideReplica('${name}', ${r.manual_down?'false':'true'})">${r.manual_down?'恢复健康':'手动宕机'}</button>`:''}
     </div>`;
   }).join('');
+}
+
+function renderPolicy(s){
+  const reps = Object.entries(s.replicas);
+  const versions = reps.map(([,r])=>r.policy_version).filter(v=>v!=null);
+  const same = versions.length === reps.length && new Set(versions).size === 1;
+  const overview = document.getElementById('policyOverview');
+  if(!versions.length){
+    overview.innerHTML = '暂未获取到副本策略版(等待探测)。';
+  } else if(same){
+    const v = versions[0];
+    const limits = reps.map(([n,r])=>`${n}=${r.policy_max_ms}ms`).join(' ｜ ');
+    overview.innerHTML = `两副本当前同版: <b>v${v}</b> ｜ 上限: ${esc(limits)}`;
+    const input = document.getElementById('expectedVersion');
+    if(document.activeElement !== input) input.value = v;
+  } else {
+    overview.innerHTML = '<span style="color:var(--red)">⚠️ 两端策略版不一致: ' +
+      reps.map(([n,r])=>`${n}=${r.policy_version!=null?'v'+r.policy_version:'未知'}`).join(' ｜ ') +
+      '</span>';
+  }
+  const rows = (s.publishes||[]).map(p=>`<tr>
+    <td>${p.id}</td><td><code style="font-size:11px">${esc(p.publish_id.slice(0,8))}</code></td>
+    <td>v${p.expected_version}→v${p.version}</td><td>${p.max_ms}ms</td>
+    <td><span class="badge st-${p.status}">${PUBLISH_TEXT[p.status]||p.status}</span></td>
+    <td style="max-width:380px">${esc(p.detail||'')}</td><td>${fmt(p.updated_at)}</td></tr>`).join('');
+  document.getElementById('publishes').innerHTML =
+    '<tr><th>#</th><th>发布ID</th><th>版本</th><th>上限</th><th>状态</th><th>详情</th><th>时间</th></tr>' + rows;
 }
 
 function renderDrill(s){
@@ -191,11 +256,17 @@ function renderDrill(s){
 }
 
 function renderWorks(s){
-  const rows = (s.works||[]).map(w=>`<tr><td>${fmt(w.ts)}</td><td>${w.drill_id??'-'}</td><td>${w.replica}</td>
-    <td>${w.status_code??'ERR'}</td><td>${w.latency_ms}ms</td>
-    <td class="${w.ok?'ok-msg':'err-msg'}">${w.ok?'成功':'失败'}</td></tr>`).join('');
+  const rows = (s.works||[]).map(w=>{
+    let result;
+    if(w.status_code===429) result = '<span style="color:var(--yellow)">429 超上限拒单</span>';
+    else result = `<span class="${w.ok?'ok-msg':'err-msg'}">${w.ok?'成功':'失败'}</span>`;
+    return `<tr><td>${fmt(w.ts)}</td><td>${w.drill_id??'-'}</td><td>${w.replica}</td>
+      <td>${w.status_code??'ERR'}</td><td>${w.duration_ms??'-'}ms</td>
+      <td>${w.policy_version!=null?'v'+w.policy_version:'-'}</td>
+      <td>${w.latency_ms}ms</td><td>${result}</td></tr>`;
+  }).join('');
   document.getElementById('works').innerHTML =
-    '<tr><th>时间</th><th>轮次</th><th>副本</th><th>状态码</th><th>耗时</th><th>结果</th></tr>' + rows;
+    '<tr><th>时间</th><th>轮次</th><th>副本</th><th>状态码</th><th>请求耗时</th><th>裁决版</th><th>实际往返</th><th>结果</th></tr>' + rows;
 }
 
 function renderHistory(s){
@@ -219,6 +290,33 @@ async function start(){
   poll();
 }
 
+async function publishPolicy(){
+  const max_ms = parseInt(document.getElementById('maxMs').value, 10);
+  const expected_version = parseInt(document.getElementById('expectedVersion').value, 10);
+  const msg = document.getElementById('publishMsg');
+  const btn = document.getElementById('publishBtn');
+  if(!Number.isInteger(max_ms) || max_ms < 50 || max_ms > 500){
+    msg.textContent = '上限须为 50~500 毫秒之间的整数'; msg.className = 'msg err-msg'; return;
+  }
+  btn.disabled = true;
+  msg.textContent = '发布中(两阶段提交)…'; msg.className = 'msg';
+  try{
+    const r = await fetch('/api/policy/publish', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({max_ms, expected_version})});
+    const j = await r.json().catch(()=>({}));
+    if(r.ok){
+      msg.textContent = `✅ 发布成功: 两端已提交 v${j.version}, 上限 ${j.max_ms}ms`;
+      msg.className = 'msg ok-msg';
+    } else {
+      msg.textContent = '❌ ' + (j.detail||r.status);
+      msg.className = 'msg err-msg';
+    }
+  }catch(e){ msg.textContent = '请求失败:' + e; msg.className = 'msg err-msg'; }
+  btn.disabled = false;
+  poll();
+}
+
 async function togglePeer(){
   if(!lastState || !lastState.drill) return;
   const peer = lastState.drill.peer;
@@ -238,17 +336,27 @@ async function overrideReplica(name, down){
 
 async function sendWork(replica){
   const msg = document.getElementById('workMsg');
+  const raw = document.getElementById('workDuration').value.trim();
+  const duration_ms = raw === '' ? null : parseInt(raw, 10);
   try{
+    const body = {replica};
+    if(duration_ms != null) body.duration_ms = duration_ms;
     const r = await fetch('/api/work', {method:'POST', headers:{'Content-Type':'application/json'},
-                                        body:JSON.stringify({replica})});
+                                        body:JSON.stringify(body)});
     const j = await r.json();
-    msg.textContent = `${replica} -> ${j.status_code||'ERR'} ${j.ok?'接单成功':'接单失败'} (${j.latency_ms}ms)`;
-    msg.className = 'msg ' + (j.ok ? 'ok-msg' : 'err-msg');
+    if(j.status_code === 429){
+      msg.textContent = `${replica} -> 429 超上限拒单(请求 ${j.body?.requested_ms??'-'}ms > 上限 ${j.body?.limit_ms??'-'}ms, 策略版 v${j.body?.policy_version??'-'})`;
+      msg.className = 'msg err-msg';
+    } else {
+      msg.textContent = `${replica} -> ${j.status_code||'ERR'} ${j.ok?'接单成功':'接单失败'} (耗时 ${j.duration_ms??'-'}ms, 策略版 v${j.policy_version??'-'}, 往返 ${j.latency_ms}ms)`;
+      msg.className = 'msg ' + (j.ok ? 'ok-msg' : 'err-msg');
+    }
   }catch(e){ msg.textContent = '请求失败:' + e; msg.className = 'msg err-msg'; }
   poll();
 }
 
 document.getElementById('startBtn').onclick = start;
+document.getElementById('publishBtn').onclick = publishPolicy;
 setInterval(()=>{
   const el = document.getElementById('cd');
   if(el && countdownDeadline){
