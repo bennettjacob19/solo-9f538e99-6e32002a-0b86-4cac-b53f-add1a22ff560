@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>双副本故障演练控制台</title>
+<style>
+  :root { --bg:#0f1420; --panel:#1a2233; --border:#2b3a56; --fg:#e6ebf5; --muted:#8b98b8;
+          --green:#2fbf71; --red:#e5484d; --yellow:#f5a524; --gray:#5b6b8c; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family:"PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+         background:var(--bg); color:var(--fg); }
+  header { padding:16px 24px; border-bottom:1px solid var(--border); display:flex;
+           justify-content:space-between; align-items:baseline; }
+  header h1 { font-size:20px; margin:0; }
+  header .clock { color:var(--muted); font-size:13px; }
+  main { max-width:1080px; margin:0 auto; padding:20px 24px 60px; }
+  section { background:var(--panel); border:1px solid var(--border); border-radius:10px;
+            padding:16px 20px; margin-bottom:18px; }
+  h2 { font-size:15px; margin:0 0 12px; color:var(--muted); font-weight:600; }
+  .cards { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+  .card { background:#141b2c; border:1px solid var(--border); border-radius:8px; padding:14px 16px; }
+  .card h3 { margin:0 0 8px; font-size:15px; }
+  .dot { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:6px; }
+  .dot.up, .dot.ok { background:var(--green); }
+  .dot.down, .dot.fail { background:var(--red); }
+  .dot.unknown { background:var(--gray); }
+  .flags { color:var(--yellow); font-size:12px; min-height:16px; margin-top:4px; }
+  .url { color:var(--muted); font-size:12px; margin-top:4px; }
+  button { background:#2f6fed; color:#fff; border:none; border-radius:6px; padding:8px 14px;
+           font-size:13px; cursor:pointer; margin:4px 6px 0 0; }
+  button:hover { background:#3d7bff; }
+  button:disabled { background:#33405e; cursor:not-allowed; }
+  button.warn-btn { background:#8a5a00; }
+  select, input { background:#0f1524; color:var(--fg); border:1px solid var(--border);
+                  border-radius:6px; padding:7px 10px; font-size:13px; margin-right:10px; }
+  label { font-size:13px; color:var(--muted); margin-right:14px; }
+  .badge { display:inline-block; padding:3px 10px; border-radius:12px; font-size:12px; font-weight:600; }
+  .st-active { background:#123; color:#7cc7ff; border:1px solid #2f6fed; }
+  .st-recovering { background:#2a2103; color:var(--yellow); border:1px solid var(--yellow); }
+  .st-pending_recovery { background:#2a0d0e; color:var(--red); border:1px solid var(--red); }
+  .st-finished { background:#0e2a1a; color:var(--green); border:1px solid var(--green); }
+  .conclusion { margin-top:10px; padding:10px 14px; border-radius:8px; font-weight:600; font-size:14px; }
+  .conclusion.available { background:#0e2a1a; color:var(--green); }
+  .conclusion.unavailable { background:#2a0d0e; color:var(--red); }
+  .conclusion.interrupted { background:#2a2103; color:var(--yellow); }
+  .warn { margin-top:10px; padding:10px 14px; border-radius:8px; background:#2a0d0e; color:var(--red); font-size:13px; }
+  .info { margin-top:10px; padding:10px 14px; border-radius:8px; background:#12203a; color:#9fc2ff; font-size:13px; }
+  .kv { margin:6px 0; font-size:14px; }
+  .kv b { color:#fff; }
+  .dots { margin-top:6px; line-height:14px; }
+  .dots .dot { width:9px; height:9px; margin:0 2px 0 0; }
+  table { width:100%; border-collapse:collapse; font-size:12px; margin-top:10px; }
+  th, td { text-align:left; padding:5px 8px; border-bottom:1px solid var(--border); }
+  th { color:var(--muted); font-weight:600; }
+  .ok-msg { color:var(--green); } .err-msg { color:var(--red); }
+  .msg { font-size:13px; margin-top:8px; min-height:18px; }
+  #cd { font-size:22px; font-weight:700; color:#7cc7ff; }
+</style>
+</head>
+<body>
+<header>
+  <h1>双副本故障演练控制台</h1>
+  <div class="clock" id="clock"></div>
+</header>
+<main>
+  <section>
+    <h2>副本实时状态</h2>
+    <div class="cards" id="replicas"></div>
+  </section>
+
+  <section>
+    <h2>发起演练(注入故障使目标副本 /health、/work 持续返回 503)</h2>
+    <label>目标副本
+      <select id="target">
+        <option value="replica1">replica1</option>
+        <option value="replica2">replica2</option>
+      </select>
+    </label>
+    <label>故障时长(秒, 5~30)
+      <input id="duration" type="number" min="5" max="30" value="10">
+    </label>
+    <button id="startBtn">开始演练</button>
+    <div class="msg" id="startMsg"></div>
+  </section>
+
+  <section id="drill-panel"><h2>本轮演练</h2><div id="drillBody">加载中…</div></section>
+
+  <section>
+    <h2>真实 /work 请求(向任一副本发起真实接单调用)</h2>
+    <button onclick="sendWork('replica1')">向 replica1 发送 /work</button>
+    <button onclick="sendWork('replica2')">向 replica2 发送 /work</button>
+    <div class="msg" id="workMsg"></div>
+    <table id="works"></table>
+  </section>
+
+  <section>
+    <h2>历史轮次</h2>
+    <table id="history"></table>
+  </section>
+</main>
+
+<script>
+const STATUS_TEXT = {active:'演练中', recovering:'恢复中', pending_recovery:'待恢复', finished:'已结束'};
+const REASON_TEXT = {duration_reached:'期限到达(演练正常结束)', peer_failed:'另一副本失效(提前终止)',
+                     restart_interrupted:'演练服务重启(恢复遗留故障)'};
+const CONCLUSION_TEXT = {
+  available:'✅ 可用:单副本故障期间另一副本持续健康,服务可继续接单',
+  unavailable:'❌ 不可用:另一副本在演练期间失效,双副本同时不可用',
+  interrupted:'⚠️ 中断:演练被服务重启打断,无有效结论'
+};
+const CONCLUSION_SHORT = {available:'可用', unavailable:'不可用', interrupted:'中断'};
+
+let lastState = null;
+let serverOffset = 0;
+let countdownDeadline = null;
+
+function esc(s){ return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function fmt(iso){ return iso ? new Date(iso).toLocaleTimeString('zh-CN',{hour12:false}) : '-'; }
+
+async function poll(){
+  try{
+    const r = await fetch('/api/state');
+    const s = await r.json();
+    serverOffset = new Date(s.now).getTime() - Date.now();
+    lastState = s;
+    render(s);
+  }catch(e){ /* 保留旧画面 */ }
+}
+
+function render(s){
+  document.getElementById('clock').textContent = '服务器时间 ' + fmt(s.now);
+  renderReplicas(s);
+  document.getElementById('startBtn').disabled = !!s.drill;
+  renderDrill(s);
+  renderWorks(s);
+  renderHistory(s);
+}
+
+function renderReplicas(s){
+  document.getElementById('replicas').innerHTML = Object.entries(s.replicas).map(([name,r])=>{
+    const cls = r.ok===true ? 'up' : (r.ok===false ? 'down' : 'unknown');
+    const flags = [];
+    if(r.fault_injected) flags.push('故障注入中');
+    if(r.manual_down) flags.push('手动宕机');
+    const canToggle = !s.drill;
+    return `<div class="card">
+      <h3>${name}</h3>
+      <div><span class="dot ${cls}"></span>${r.ok===true?'健康':r.ok===false?'不可用':'未知'}
+        ${r.status_code?('HTTP '+r.status_code):''} ${r.latency_ms!=null?(r.latency_ms+'ms'):''}
+        ${r.detail?esc(r.detail):''}</div>
+      <div class="flags">${flags.join(' · ')||'&nbsp;'}</div>
+      <div class="url">${esc(r.url||'')}</div>
+      ${canToggle?`<button class="warn-btn" onclick="overrideReplica('${name}', ${r.manual_down?'false':'true'})">${r.manual_down?'恢复健康':'手动宕机'}</button>`:''}
+    </div>`;
+  }).join('');
+}
+
+function renderDrill(s){
+  const d = s.drill, lf = s.last_finished;
+  const show = d || lf;
+  const el = document.getElementById('drillBody');
+  if(!show){ el.innerHTML = '<div class="kv">尚未进行演练。</div>'; countdownDeadline = null; return; }
+  let html = `<div class="kv">轮次 <b>#${show.id}</b> ｜ 目标副本 <b>${show.target}</b> ｜ 另一副本 <b>${show.peer}</b> ｜
+    故障时长 <b>${show.duration}s</b> ｜ 状态 <span class="badge st-${show.status}">${STATUS_TEXT[show.status]||show.status}</span></div>`;
+  if(show.status === 'active'){
+    countdownDeadline = new Date(show.deadline_at).getTime();
+    html += `<div class="kv">剩余时间 <span id="cd">…</span></div>`;
+  } else { countdownDeadline = null; }
+  if(show.termination_reason)
+    html += `<div class="kv">终止原因:<b>${REASON_TEXT[show.termination_reason]||show.termination_reason}</b></div>`;
+  if(show.conclusion)
+    html += `<div class="conclusion ${show.conclusion}">${CONCLUSION_TEXT[show.conclusion]||show.conclusion}</div>`;
+  if(show.status === 'pending_recovery')
+    html += `<div class="warn">⚠️ 撤销失败,待恢复,持续重试中(已尝试 ${show.revoke_attempts} 次)。最后错误:${esc(show.last_error||'')}</div>`;
+  if(show.status === 'recovering')
+    html += `<div class="info">已触发终止,正在撤销故障注入并等待 ${show.target} 恢复健康…(撤销尝试 ${show.revoke_attempts} 次)</div>`;
+  if(show.status === 'finished')
+    html += `<div class="info">受注入副本 ${show.target} 已恢复健康,本轮已结束(结束于 ${fmt(show.ended_at)})。</div>`;
+  if(d && d.status === 'active'){
+    const peerLive = s.replicas[d.peer] || {};
+    html += `<div style="margin-top:10px"><button class="warn-btn" id="togglePeer">切换另一副本(${d.peer})健康状态 — 当前:${peerLive.manual_down?'手动宕机':'健康'}</button></div>`;
+  }
+  const probes = s.probes || [];
+  const okc = probes.filter(p=>p.ok).length;
+  html += `<div class="kv" style="margin-top:12px">探测记录(共 ${probes.length} 次,成功 ${okc},失败 ${probes.length-okc}):</div><div class="dots">` +
+    probes.map(p=>`<span class="dot ${p.ok?'ok':'fail'}" title="${fmt(p.ts)} ${p.replica} ${p.ok?'OK':'FAIL'} ${esc(p.detail||'')} ${p.latency_ms}ms"></span>`).join('') + '</div>';
+  el.innerHTML = html;
+  const tb = document.getElementById('togglePeer');
+  if(tb) tb.onclick = togglePeer;
+}
+
+function renderWorks(s){
+  const rows = (s.works||[]).map(w=>`<tr><td>${fmt(w.ts)}</td><td>${w.drill_id??'-'}</td><td>${w.replica}</td>
+    <td>${w.status_code??'ERR'}</td><td>${w.latency_ms}ms</td>
+    <td class="${w.ok?'ok-msg':'err-msg'}">${w.ok?'成功':'失败'}</td></tr>`).join('');
+  document.getElementById('works').innerHTML =
+    '<tr><th>时间</th><th>轮次</th><th>副本</th><th>状态码</th><th>耗时</th><th>结果</th></tr>' + rows;
+}
+
+function renderHistory(s){
+  const rows = (s.history||[]).map(d=>`<tr><td>#${d.id}</td><td>${d.target}</td><td>${d.duration}s</td>
+    <td>${STATUS_TEXT[d.status]||d.status}</td>
+    <td>${REASON_TEXT[d.termination_reason]||d.termination_reason||'-'}</td>
+    <td>${CONCLUSION_SHORT[d.conclusion]||d.conclusion||'-'}</td>
+    <td>${fmt(d.started_at)}</td><td>${fmt(d.ended_at)}</td></tr>`).join('');
+  document.getElementById('history').innerHTML =
+    '<tr><th>轮次</th><th>目标</th><th>时长</th><th>状态</th><th>终止原因</th><th>结论</th><th>开始</th><th>结束</th></tr>' + rows;
+}
+
+async function start(){
+  const target = document.getElementById('target').value;
+  const duration = parseInt(document.getElementById('duration').value, 10);
+  const msg = document.getElementById('startMsg');
+  const r = await fetch('/api/drills', {method:'POST', headers:{'Content-Type':'application/json'},
+                                        body:JSON.stringify({target, duration})});
+  if(r.ok){ msg.textContent = '演练已开始'; msg.className = 'msg ok-msg'; }
+  else { const j = await r.json().catch(()=>({})); msg.textContent = '启动失败:' + (j.detail||r.status); msg.className = 'msg err-msg'; }
+  poll();
+}
+
+async function togglePeer(){
+  if(!lastState || !lastState.drill) return;
+  const peer = lastState.drill.peer;
+  const cur = !!(lastState.replicas[peer] && lastState.replicas[peer].manual_down);
+  const r = await fetch(`/api/replicas/${peer}/override`, {method:'POST', headers:{'Content-Type':'application/json'},
+                                                           body:JSON.stringify({down:!cur})});
+  if(!r.ok){ const j = await r.json().catch(()=>({})); alert('切换失败:' + (j.detail||r.status)); }
+  poll();
+}
+
+async function overrideReplica(name, down){
+  const r = await fetch(`/api/replicas/${name}/override`, {method:'POST', headers:{'Content-Type':'application/json'},
+                                                           body:JSON.stringify({down})});
+  if(!r.ok){ const j = await r.json().catch(()=>({})); alert('操作失败:' + (j.detail||r.status)); }
+  poll();
+}
+
+async function sendWork(replica){
+  const msg = document.getElementById('workMsg');
+  try{
+    const r = await fetch('/api/work', {method:'POST', headers:{'Content-Type':'application/json'},
+                                        body:JSON.stringify({replica})});
+    const j = await r.json();
+    msg.textContent = `${replica} -> ${j.status_code||'ERR'} ${j.ok?'接单成功':'接单失败'} (${j.latency_ms}ms)`;
+    msg.className = 'msg ' + (j.ok ? 'ok-msg' : 'err-msg');
+  }catch(e){ msg.textContent = '请求失败:' + e; msg.className = 'msg err-msg'; }
+  poll();
+}
+
+document.getElementById('startBtn').onclick = start;
+setInterval(()=>{
+  const el = document.getElementById('cd');
+  if(el && countdownDeadline){
+    const remain = Math.max(0, (countdownDeadline - (Date.now()+serverOffset))/1000);
+    el.textContent = remain.toFixed(1) + 's';
+  }
+}, 200);
+setInterval(poll, 1000);
+poll();
+</script>
+</body>
+</html>

@@ -1,0 +1,34 @@
+services:
+  replica1:
+    build: .
+    command: ["uvicorn", "replica_app:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      REPLICA_NAME: replica1
+    ports:
+      - "8001:8000"
+
+  replica2:
+    build: .
+    command: ["uvicorn", "replica_app:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      REPLICA_NAME: replica2
+    ports:
+      - "8002:8000"
+
+  drill:
+    build: .
+    command: ["uvicorn", "drill_app:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      REPLICA1_URL: http://replica1:8000
+      REPLICA2_URL: http://replica2:8000
+      DB_PATH: /data/drill.db
+    volumes:
+      - drill-data:/data
+    ports:
+      - "8000:8000"
+    depends_on:
+      - replica1
+      - replica2
+
+volumes:
+  drill-data:
